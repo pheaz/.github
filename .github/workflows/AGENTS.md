@@ -12,6 +12,7 @@
 - `WF-008` Matrices SHOULD only represent variations of the same job.
 - `WF-009` Job dependencies, conditions, and orchestration SHOULD remain explicit in workflow YAML.
 - `WF-010` Workflow and job identifiers MUST use simple semantic names.
+- `WF-011` Repository synchronization workflow filenames MUST use the pattern `sync-<target>.yml`; use `dotgithub` for the `.github` repository.
 
 ## Preferences
 
