@@ -1,0 +1,22 @@
+{
+  "agents": [
+    {
+      "source": ".github/AGENTS.md",
+      "dest": ".github/AGENTS.md"
+    },
+    {
+      "source": ".github/actions/AGENTS.md",
+      "dest": ".github/actions/AGENTS.md"
+    },
+    {
+      "source": ".github/workflows/AGENTS.md",
+      "dest": ".github/workflows/AGENTS.md"
+    }
+  ],
+  "workflows": [
+    {
+      "source": ".github/workflows/lint-pr.yml",
+      "dest": ".github/workflows/lint-pr.yml"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+# /.gitignore
+
+# Discovery outputs can contain private repository names.
+/.github/sync.yml
+/tofu/repositories.auto.tfvars.json
+
+# Credentials, plans, state, and provider caches are local runtime data.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+*.local.tfvars
+*.local.tfvars.json
+*.local.hcl
+__pycache__/
+*.pyc

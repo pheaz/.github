@@ -1,0 +1,96 @@
+# /.github/workflows/sync.yml
+
+name: Sync canonical files
+
+on:
+  workflow_dispatch:
+    inputs:
+      repositories:
+        description: Comma-separated pheaz/repo pilot targets; empty selects all eligible repositories
+        type: string
+        required: false
+        default: ''
+      dry_run:
+        description: Compare files without pushing branches or opening pull requests
+        type: boolean
+        required: true
+        default: true
+  push:
+    branches: [main]
+    paths:
+      - .github/AGENTS.md
+      - .github/actions/AGENTS.md
+      - .github/workflows/AGENTS.md
+      - .github/workflows/lint-pr.yml
+      - .github/sync-files.json
+      - .github/scripts/discover.py
+      - .github/workflows/sync.yml
+  schedule:
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canonical-file-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    # Automatic sync remains off until the pilot succeeds and this variable is set.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.FILE_SYNC_ENABLED == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the canonical snapshot
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Create a discovery token
+        id: discovery-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.FILE_SYNC_APP_ID }}
+          private-key: ${{ secrets.FILE_SYNC_APP_PRIVATE_KEY }}
+          owner: pheaz
+          permission-contents: read
+
+      - name: Discover and validate targets
+        id: targets
+        env:
+          GH_TOKEN: ${{ steps.discovery-token.outputs.token }}
+          SYNC_REPOSITORIES: ${{ inputs.repositories }}
+        run: python3 .github/scripts/discover.py --sync-repositories "$SYNC_REPOSITORIES" --github-output "$GITHUB_OUTPUT"
+
+      - name: Create a scoped sync token
+        if: steps.targets.outputs.has_targets == 'true'
+        id: sync-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.FILE_SYNC_APP_ID }}
+          private-key: ${{ secrets.FILE_SYNC_APP_PRIVATE_KEY }}
+          owner: pheaz
+          repositories: ${{ steps.targets.outputs.token_repositories }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+
+      - name: Synchronize through pull requests
+        if: steps.targets.outputs.has_targets == 'true'
+        uses: raven-actions/repo-files-sync@bb4d579be65a4086050c7e5441fb6f69a382db07 # v0.1.0-rc.17
+        with:
+          GH_TOKEN: ${{ steps.sync-token.outputs.token }}
+          CONFIG_PATH: .github/sync.yml
+          GIT_USERNAME: pheaz-file-sync
+          GIT_EMAIL: pheaz-file-sync@users.noreply.github.com
+          PR_TITLE: 'chore: sync canonical policy files'
+          COMMIT_PREFIX: 'chore:'
+          COMMIT_EACH_FILE: 'false'
+          PR_LABELS: 'false'
+          BRANCH_PREFIX: repo-sync/pheaz-policy
+          OVERWRITE_EXISTING_PR: 'true'
+          SKIP_PR: 'false'
+          DELETE_ORPHANED: 'false'
+          REBASE: 'false'
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
