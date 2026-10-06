@@ -18,4 +18,4 @@
 - `WF-P001` Linux runners SHOULD be the default.
 - `WF-P002` A job that can execute correctly on Linux SHOULD run on Linux.
 - `WF-P003` macOS or Windows runners SHOULD only be used for platform-specific requirements or explicit compatibility testing.
-- `WF-P004` `pr-title.yml` MUST NOT be modified.
+- `WF-P004` `lint-pr.yml` MUST NOT be modified.
