@@ -35,7 +35,7 @@ delete_branch() {
   if [ "$current_default_branch" != "$default_branch" ]; then
     printf '  [CHANGED] %-30s default branch changed; preserving\n' \
       "$branch"
-    return 0
+    return 10
   fi
 
   if ! current_default_sha="$(
@@ -51,7 +51,7 @@ delete_branch() {
   if [ "$current_default_sha" != "$expected_default_sha" ]; then
     printf '  [CHANGED] %-30s default branch moved; preserving\n' \
       "$branch"
-    return 0
+    return 10
   fi
 
   if ! current_branch_sha="$(
@@ -61,13 +61,13 @@ delete_branch() {
   )"; then
     printf '  [CHANGED] %-30s branch no longer readable; preserving\n' \
       "$branch"
-    return 0
+    return 10
   fi
 
   if [ "$current_branch_sha" != "$expected_branch_sha" ]; then
     printf '  [CHANGED] %-30s branch moved during scan; preserving\n' \
       "$branch"
-    return 0
+    return 10
   fi
 
   if delete_output="$(
@@ -118,11 +118,12 @@ scan_repository() {
   local comparison
   local ahead
   local behind
+  local delete_status
 
   local scanned=0
   local preserved=0
-  local deleted=0
   local changed=0
+  local deleted=0
   local failed=0
 
   while IFS=$'\t' read -r branch branch_sha; do
@@ -159,13 +160,18 @@ scan_repository() {
       continue
     fi
 
-    if delete_branch \
+    delete_branch \
       "$repo" \
       "$default_branch" \
       "$default_sha" \
       "$branch" \
-      "$branch_sha"; then
+      "$branch_sha"
+    delete_status=$?
+
+    if [ "$delete_status" -eq 0 ]; then
       deleted=$((deleted + 1))
+    elif [ "$delete_status" -eq 10 ]; then
+      changed=$((changed + 1))
     else
       failed=$((failed + 1))
     fi
@@ -174,6 +180,7 @@ scan_repository() {
   printf '  Summary\n'
   printf '    Branches scanned:  %d\n' "$scanned"
   printf '    Preserved:         %d\n' "$preserved"
+  printf '    Changed mid-scan:  %d\n' "$changed"
   printf '    Deleted:           %d\n' "$deleted"
   printf '    Failed:            %d\n' "$failed"
 
