@@ -2,7 +2,10 @@
 # /scripts/sync-pheaz-agents-by-sha.sh
 
 ORG="pheaz"
-SOURCE_REPO="${ORG}/.github"
+SOURCE_REPO="$ORG/.github"
+RULESET_NAME="ruleset-baseline"
+API_VERSION="2026-03-10"
+COMMIT_MESSAGE="chore: sync AGENTS.md from $SOURCE_REPO"
 
 SOURCE_PATHS=(
   ".github/AGENTS.md"
@@ -10,33 +13,140 @@ SOURCE_PATHS=(
   ".github/workflows/AGENTS.md"
 )
 
-COMMIT_MESSAGE="chore: sync AGENTS.md from ${SOURCE_REPO}"
+RULESET_ID=""
+RULESET_ENFORCEMENT=""
+RULESET_CHANGED=0
+
+api() {
+  gh api -H "X-GitHub-Api-Version: $API_VERSION" "$@"
+}
 
 require_command() {
-  if ! command -v "$1" >/dev/null 2>&1; then
+  command -v "$1" >/dev/null 2>&1 || {
     printf 'Missing required command: %s\n' "$1" >&2
     return 2
+  }
+}
+
+load_ruleset() {
+  local ids
+  local count
+
+  ids="$(
+    api --paginate "orgs/$ORG/rulesets?per_page=100" \
+      --jq ".[] | select(.name == \"$RULESET_NAME\") | .id"
+  )" || return 2
+
+  count="$(printf '%s\n' "$ids" | awk 'NF { n++ } END { print n + 0 }')"
+
+  if [ "$count" -ne 1 ]; then
+    printf 'Expected exactly one ruleset named %s; found %s\n' \
+      "$RULESET_NAME" "$count" >&2
+    return 2
   fi
+
+  RULESET_ID="$ids"
+  RULESET_ENFORCEMENT="$(
+    api "orgs/$ORG/rulesets/$RULESET_ID" --jq '.enforcement'
+  )" || return 2
+
+  printf 'Ruleset:\n'
+  printf '  name: %s\n' "$RULESET_NAME"
+  printf '  id: %s\n' "$RULESET_ID"
+  printf '  enforcement: %s\n\n' "$RULESET_ENFORCEMENT"
+}
+
+disable_ruleset() {
+  local actual
+
+  if [ "$RULESET_ENFORCEMENT" = "disabled" ]; then
+    printf 'Ruleset already disabled: %s\n\n' "$RULESET_NAME"
+    return 0
+  fi
+
+  printf 'Temporarily disabling ruleset: %s\n' "$RULESET_NAME"
+
+  api --method PUT "orgs/$ORG/rulesets/$RULESET_ID" \
+    -f enforcement=disabled >/dev/null || return 2
+
+  RULESET_CHANGED=1
+
+  actual="$(api "orgs/$ORG/rulesets/$RULESET_ID" --jq '.enforcement')" ||
+    return 2
+
+  if [ "$actual" != "disabled" ]; then
+    printf 'Ruleset disable verification failed: %s\n' "$actual" >&2
+    return 2
+  fi
+
+  printf 'Ruleset disabled.\n\n'
+}
+
+restore_ruleset() {
+  local actual
+
+  if [ "$RULESET_CHANGED" -ne 1 ]; then
+    return 0
+  fi
+
+  printf '\nRestoring ruleset: %s\n' "$RULESET_NAME"
+  printf '  enforcement: %s\n' "$RULESET_ENFORCEMENT"
+
+  api --method PUT "orgs/$ORG/rulesets/$RULESET_ID" \
+    -f "enforcement=$RULESET_ENFORCEMENT" >/dev/null || return 4
+
+  actual="$(api "orgs/$ORG/rulesets/$RULESET_ID" --jq '.enforcement')" ||
+    return 4
+
+  if [ "$actual" != "$RULESET_ENFORCEMENT" ]; then
+    printf 'Ruleset restore verification failed: expected %s, got %s\n' \
+      "$RULESET_ENFORCEMENT" "$actual" >&2
+    return 4
+  fi
+
+  RULESET_CHANGED=0
+  printf 'Ruleset restored.\n'
+}
+
+cleanup() {
+  restore_ruleset
+}
+
+write_file() {
+  local repo="$1"
+  local branch="$2"
+  local path="$3"
+  local source_content="$4"
+  local destination_sha="$5"
+
+  if [ -n "$destination_sha" ]; then
+    api --method PUT "repos/$repo/contents/$path" \
+      -f "message=$COMMIT_MESSAGE" \
+      -f "content=$source_content" \
+      -f "sha=$destination_sha" \
+      -f "branch=$branch"
+    return $?
+  fi
+
+  api --method PUT "repos/$repo/contents/$path" \
+    -f "message=$COMMIT_MESSAGE" \
+    -f "content=$source_content" \
+    -f "branch=$branch"
 }
 
 main() {
   require_command gh || return 2
   require_command jq || return 2
+  require_command awk || return 2
 
-  if ! gh auth status >/dev/null 2>&1; then
+  gh auth status >/dev/null 2>&1 || {
     printf 'GitHub CLI is not authenticated. Run: gh auth login\n' >&2
     return 2
-  fi
+  }
 
   local source_branch
-  source_branch="$(
-    gh api "repos/${SOURCE_REPO}" --jq '.default_branch' 2>/dev/null
-  )"
-
-  if [ -z "$source_branch" ]; then
-    printf 'Could not determine the default branch for %s\n' "$SOURCE_REPO" >&2
+  source_branch="$(api "repos/$SOURCE_REPO" --jq '.default_branch')" ||
     return 2
-  fi
 
   local source_shas=()
   local source_contents=()
@@ -48,14 +158,10 @@ main() {
   printf 'Source: %s@%s\n' "$SOURCE_REPO" "$source_branch"
 
   for path in "${SOURCE_PATHS[@]}"; do
-    if ! source_json="$(
-      gh api --method GET \
-        "repos/${SOURCE_REPO}/contents/${path}" \
-        -f "ref=${source_branch}" 2>/dev/null
-    )"; then
-      printf 'Could not read source file: %s\n' "$path" >&2
-      return 2
-    fi
+    source_json="$(
+      api --method GET "repos/$SOURCE_REPO/contents/$path" \
+        -f "ref=$source_branch"
+    )" || return 2
 
     source_sha="$(printf '%s' "$source_json" | jq -r '.sha // empty')"
     source_content="$(
@@ -71,9 +177,25 @@ main() {
 
     source_shas+=("$source_sha")
     source_contents+=("$source_content")
-
     printf '  %s  %s\n' "$source_sha" "$path"
   done
+
+  local repositories
+  repositories="$(
+    api --paginate --method GET "orgs/$ORG/repos" \
+      -f per_page=100 \
+      -f type=all \
+      --jq '
+        .[]
+        | select(.fork == false)
+        | [.full_name, (.archived | tostring), .default_branch]
+        | @tsv
+      '
+  )" || return 2
+
+  load_ruleset || return 2
+  trap cleanup EXIT
+  disable_ruleset || return 2
 
   local scanned=0
   local eligible=0
@@ -84,110 +206,90 @@ main() {
 
   local repo
   local archived
-  local default_branch
-  local github_dir_json
-  local i
-  local dest_json
-  local dest_sha
-  local src_sha
-  local src_content
-  local write_output
+  local branch
+  local github_dir
+  local index
+  local destination_json
+  local destination_sha
+  local output
 
-  while IFS=$'\t' read -r repo archived default_branch; do
+  while IFS=$'\t' read -r repo archived branch; do
     [ -n "$repo" ] || continue
     scanned=$((scanned + 1))
 
-    if ! github_dir_json="$(
-      gh api --method GET \
-        "repos/${ORG}/${repo}/contents/.github" \
-        -f "ref=${default_branch}" 2>/dev/null
-    )"; then
-      printf '[SKIP] %-40s no .github directory\n' "${ORG}/${repo}"
+    if [ -z "$branch" ] || [ "$branch" = "null" ]; then
+      printf '[SKIP] %-40s no default branch\n' "$repo"
       continue
     fi
 
-    if ! printf '%s' "$github_dir_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
-      printf '[SKIP] %-40s .github exists but is not a directory\n' "${ORG}/${repo}"
+    if ! github_dir="$(
+      api --method GET "repos/$repo/contents/.github" -f "ref=$branch" 2>/dev/null
+    )"; then
+      printf '[SKIP] %-40s no .github directory\n' "$repo"
+      continue
+    fi
+
+    if ! printf '%s' "$github_dir" | jq -e 'type == "array"' >/dev/null 2>&1; then
+      printf '[SKIP] %-40s .github exists but is not a directory\n' "$repo"
       continue
     fi
 
     eligible=$((eligible + 1))
-    printf '\n[REPO] %s/%s (%s)\n' "$ORG" "$repo" "$default_branch"
+    printf '\n[REPO] %s (%s)\n' "$repo" "$branch"
 
-    i=0
-    while [ "$i" -lt "${#SOURCE_PATHS[@]}" ]; do
-      path="${SOURCE_PATHS[$i]}"
-      src_sha="${source_shas[$i]}"
-      src_content="${source_contents[$i]}"
-      dest_sha=""
+    index=0
+    while [ "$index" -lt "${#SOURCE_PATHS[@]}" ]; do
+      path="${SOURCE_PATHS[$index]}"
+      source_sha="${source_shas[$index]}"
+      source_content="${source_contents[$index]}"
+      destination_sha=""
 
-      if dest_json="$(
-        gh api --method GET \
-          "repos/${ORG}/${repo}/contents/${path}" \
-          -f "ref=${default_branch}" 2>/dev/null
+      if destination_json="$(
+        api --method GET "repos/$repo/contents/$path" \
+          -f "ref=$branch" 2>/dev/null
       )"; then
-        dest_sha="$(printf '%s' "$dest_json" | jq -r '.sha // empty')"
+        destination_sha="$(
+          printf '%s' "$destination_json" | jq -r '.sha // empty'
+        )"
       fi
 
-      if [ "$dest_sha" = "$src_sha" ]; then
+      if [ "$destination_sha" = "$source_sha" ]; then
         unchanged=$((unchanged + 1))
-        printf '  [SAME]   %s  %s\n' "$src_sha" "$path"
-        i=$((i + 1))
+        printf '  [SAME]   %s  %s\n' "$source_sha" "$path"
+        index=$((index + 1))
         continue
       fi
 
       if [ "$archived" = "true" ]; then
         failed=$((failed + 1))
-        if [ -n "$dest_sha" ]; then
-          printf '  [BLOCK]  %s  archived repo; SHA differs (%s -> %s)\n' \
-            "$path" "$dest_sha" "$src_sha" >&2
-        else
-          printf '  [BLOCK]  %s  archived repo; file is missing\n' "$path" >&2
-        fi
-        i=$((i + 1))
+        printf '  [BLOCK]  %s  archived repository\n' "$path" >&2
+        index=$((index + 1))
         continue
       fi
 
-      if [ -n "$dest_sha" ]; then
-        if write_output="$(
-          gh api --method PUT \
-            "repos/${ORG}/${repo}/contents/${path}" \
-            -f "message=${COMMIT_MESSAGE}" \
-            -f "content=${src_content}" \
-            -f "sha=${dest_sha}" \
-            -f "branch=${default_branch}" 2>&1
-        )"; then
+      if output="$(
+        write_file "$repo" "$branch" "$path" \
+          "$source_content" "$destination_sha" 2>&1
+      )"; then
+        if [ -n "$destination_sha" ]; then
           updated=$((updated + 1))
-          printf '  [UPDATE] %s  %s -> %s\n' "$path" "$dest_sha" "$src_sha"
+          printf '  [UPDATE] %s  %s -> %s\n' \
+            "$path" "$destination_sha" "$source_sha"
         else
-          failed=$((failed + 1))
-          printf '  [FAIL]   %s\n%s\n' "$path" "$write_output" >&2
+          created=$((created + 1))
+          printf '  [CREATE] %s  %s\n' "$path" "$source_sha"
         fi
       else
-        if write_output="$(
-          gh api --method PUT \
-            "repos/${ORG}/${repo}/contents/${path}" \
-            -f "message=${COMMIT_MESSAGE}" \
-            -f "content=${src_content}" \
-            -f "branch=${default_branch}" 2>&1
-        )"; then
-          created=$((created + 1))
-          printf '  [CREATE] %s  %s\n' "$path" "$src_sha"
-        else
-          failed=$((failed + 1))
-          printf '  [FAIL]   %s\n%s\n' "$path" "$write_output" >&2
-        fi
+        failed=$((failed + 1))
+        printf '  [FAIL]   %s\n%s\n' "$path" "$output" >&2
       fi
 
-      i=$((i + 1))
+      index=$((index + 1))
     done
-  done < <(
-    gh api --paginate --method GET \
-      "orgs/${ORG}/repos" \
-      -f per_page=100 \
-      -f type=all \
-      --jq '.[] | select(.fork == false) | [.name, (.archived | tostring), .default_branch] | @tsv'
-  )
+  done <<< "$repositories"
+
+  restore_ruleset || return 4
+  trap - EXIT
 
   printf '\nSummary\n'
   printf '  Non-fork repos scanned: %d\n' "$scanned"
@@ -200,6 +302,8 @@ main() {
   if [ "$failed" -gt 0 ]; then
     return 3
   fi
+
+  return 0
 }
 
 main "$@"
